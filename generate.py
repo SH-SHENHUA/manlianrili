@@ -1,125 +1,110 @@
-import requests
 from ics import Calendar, Event
-from datetime import datetime
+from datetime import datetime, timedelta
+import requests
 
-# ========== 配置区 ==========
-API_KEY = "2ab7d451fdbe4e6d8c4503af82851b57"
-TEAM_ID = 40  # 曼联一线队 ID
-TIME_ZONE_OFFSET = 8
-MATCH_DURATION_HOURS = 2
-OUTPUT_FILE = "manu.ics"
-
-# 球队中英对照，后续缺队伍在这里追加
-team_map = {
-    "Manchester United": "曼联",
-    "Arsenal": "阿森纳",
-    "Liverpool": "利物浦",
-    "Chelsea": "切尔西",
-    "Manchester City": "曼城",
-    "Tottenham Hotspur": "热刺",
-    "Newcastle United": "纽卡斯尔联",
-    "Aston Villa": "阿斯顿维拉",
-    "Brighton & Hove Albion": "布莱顿",
-    "West Ham United": "西汉姆联",
-    "Crystal Palace": "水晶宫",
-    "Brentford": "布伦特福德",
-    "Wolverhampton Wanderers": "狼队",
-    "Everton": "埃弗顿",
-    "Nottingham Forest": "诺丁汉森林",
-    "Fulham": "富勒姆",
-    "Bournemouth": "伯恩茅斯",
-    "Southampton": "南安普顿",
-    "Leicester City": "莱斯特城",
-    "Ipswich Town": "伊普斯维奇"
-}
-
-comp_map = {
-    "Premier League": "英超",
-    "UEFA Champions League": "欧冠",
-    "UEFA Europa League": "欧联杯",
-    "UEFA Conference League": "欧协联",
-    "FA Cup": "足总杯",
-    "League Cup": "联赛杯"
-}
+# ==========配置区域==========
+API_KEY = "粘贴你的api‑sports密钥到双引号内部，不要空格换行"
+TEAM_ID = 40
+SEASON = 2026
+OUTPUT_FILE = "matches.ics"
 # ============================
 
-headers = {
-    "x-rapidapi-key": API_KEY,
-    "x-rapidapi-host": "api-football-v1.p.rapidapi.com"
+# 球队翻译字典
+TEAM_TRANSLATE = {
+    "Manchester United": "曼联",
+    "Liverpool": "利物浦",
+    "Arsenal": "阿森纳",
+    "Chelsea": "切尔西",
+    "Manchester City": "曼城",
+    "Tottenham": "托特纳姆热刺",
+    "Newcastle": "纽卡斯尔联",
+    "Aston Villa": "阿斯顿维拉",
+    "Brighton": "布莱顿",
+    "Crystal Palace": "水晶宫",
+    "Everton": "埃弗顿",
+    "Nottingham Forest": "诺丁汉森林",
+    "West Ham": "西汉姆联",
+    "Bournemouth": "伯恩茅斯",
+    "Fulham": "富勒姆",
+    "Wolves": "狼队",
+    "Southampton": "南安普顿",
+    "Leicester": "莱斯特城",
+    "Ipswich": "伊普斯维奇",
+    "Brentford": "布伦特福德"
 }
 
-def trans_team(name):
-    return team_map.get(name, name)
+# 联赛翻译字典
+LEAGUE_TRANSLATE = {
+    "Premier League": "英格兰超级联赛",
+    "FA Cup": "英格兰足总杯",
+    "League Cup": "英格兰联赛杯",
+    "UEFA Champions League": "欧洲冠军联赛",
+    "UEFA Europa League": "欧联杯",
+    "UEFA Conference League": "欧协联"
+}
 
-def trans_comp(name):
-    return comp_map.get(name, name)
+
+def cn_team(name: str) -> str:
+    return TEAM_TRANSLATE.get(name, name)
+
+
+def cn_league(name: str) -> str:
+    return LEAGUE_TRANSLATE.get(name, name)
+
 
 def main():
-    url = "https://api-football-v1.p.rapidapi.com/fixtures"
-    params = {"team": TEAM_ID, "season": 2026}
+    url = "https://v3.football.api-sports.io/fixtures"
+    headers = {
+        "x-apisports-key": API_KEY
+    }
+    params = {
+        "team": TEAM_ID,
+        "season": SEASON
+    }
+
     resp = requests.get(url, headers=headers, params=params)
     resp.raise_for_status()
     data = resp.json()
+
     cal = Calendar()
 
     for item in data["response"]:
         fixture = item["fixture"]
-        teams = item["teams"]
-        league = item["league"]
-        score = item["score"]
+        home_en = item["teams"]["home"]["name"]
+        away_en = item["teams"]["away"]["name"]
+        league_en = item["league"]["name"]
 
-        fixture_id = fixture["id"]
+        home_cn = cn_team(home_en)
+        away_cn = cn_team(away_en)
+        league_cn = cn_league(league_en)
+
+        match_date_raw = fixture["date"]
+        match_start = datetime.fromisoformat(match_date_raw.replace("Z", "+00:00"))
+
         status_short = fixture["status"]["short"]
+        goals_home = item["goals"]["home"]
+        goals_away = item["goals"]["away"]
 
-        # 跳过取消/延期取消
-        if status_short in ["CANC","ABD"]:
-            continue
-
-        # UTC时间转北京时间
-        utc_ts = fixture["timestamp"]
-        start_bj = datetime.fromtimestamp(utc_ts)
-
-        home_name = teams["home"]["name"]
-        away_name = teams["away"]["name"]
-        comp_name = league["name"]
-
-        home_cn = trans_team(home_name)
-        away_cn = trans_team(away_name)
-        comp_cn = trans_comp(comp_name)
-
-        home_goals = score["fulltime"]["home"]
-        away_goals = score["fulltime"]["away"]
-        is_finished = status_short == "FT"
-
-        # 生成标题：完场带比分，未结束显示VS
-        if home_name == "Manchester United":
-            if is_finished and home_goals is not None and away_goals is not None:
-                title = f"{comp_cn}：{home_cn} {home_goals}‑{away_goals} {away_cn}"
-            else:
-                title = f"{comp_cn}：{home_cn} VS {away_cn}"
+        event = Event()
+        # 比赛结束状态：FT/AET/PEN，标题替换成分数；未开赛显示VS
+        if status_short in ("FT", "AET", "PEN") and goals_home is not None and goals_away is not None:
+            event.name = f"{home_cn} {goals_home}‑{goals_away} {away_cn}"
         else:
-            if is_finished and home_goals is not None and away_goals is not None:
-                title = f"{comp_cn}：{away_cn} {away_goals}‑{home_goals} {home_cn}"
-            else:
-                title = f"{comp_cn}：{away_cn} VS {home_cn}"
+            event.name = f"{home_cn} VS {away_cn}"
 
-        e = Event()
-        e.uid = f"{fixture_id}@man‑utd‑cal.local"
-        e.name = title
-        e.begin = start_bj
-        e.duration = {"hours": MATCH_DURATION_HOURS}
+        event.begin = match_start
+        event.duration = timedelta(hours=2)
+        venue = fixture["venue"]["name"] if fixture["venue"] and fixture["venue"]["name"] else "未知球场"
+        event.description = (
+            f"赛事：{league_cn}\n"
+            f"球场：{venue}\n"
+            f"比赛ID：{fixture['id']}"
+        )
+        cal.events.add(event)
 
-        desc_lines = [f"比赛状态：{fixture['status']['long']}"]
-        if is_finished:
-            ht_h = score["halftime"]["home"]
-            ht_a = score["halftime"]["away"]
-            desc_lines.append(f"全场比分：{home_goals}‑{away_goals}")
-            desc_lines.append(f"半场比分：{ht_h}‑{ht_a}")
-        e.description = "\n".join(desc_lines)
-        cal.events.add(e)
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as fp:
+        fp.writelines(cal)
 
-    with open(OUTPUT_FILE, "w", encoding="utf‑8") as f:
-        f.write(cal.serialize())
 
 if __name__ == "__main__":
     main()
