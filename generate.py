@@ -3,7 +3,7 @@ from ics import Calendar, Event
 from datetime import datetime
 
 # ========== 配置区 ==========
-API_KEY = "填入你的RapidAPI API‑Football密钥"
+API_KEY = "2ab7d451fdbe4e6d8c4503af82851b57"
 TEAM_ID = 40  # 曼联一线队 ID
 TIME_ZONE_OFFSET = 8
 MATCH_DURATION_HOURS = 2
