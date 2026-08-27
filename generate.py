@@ -1,9 +1,10 @@
 from ics import Calendar, Event
 from datetime import datetime, timedelta
 import requests
+import sys
 
 # ==========配置区域==========
-API_KEY = "2ab7d451fdbe4e6d8c4503af82851b57"
+API_KEY = "c57992dce30fc408d01e13b57ffd4a09"
 TEAM_ID = 40
 SEASON = 2026
 OUTPUT_FILE = "matches.ics"
@@ -16,7 +17,7 @@ TEAM_TRANSLATE = {
     "Arsenal": "阿森纳",
     "Chelsea": "切尔西",
     "Manchester City": "曼城",
-    "Tottenham": "热刺",
+    "Tottenham": "托特纳姆热刺",
     "Newcastle": "纽卡斯尔联",
     "Aston Villa": "阿斯顿维拉",
     "Brighton": "布莱顿",
@@ -32,7 +33,6 @@ TEAM_TRANSLATE = {
     "Ipswich": "伊普斯维奇",
     "Brentford": "布伦特福德",
     "Leeds United": "利兹联",
-    "Leicester City": "莱斯特城",
     "Coventry City": "考文垂",
     "Hull City": "赫尔城",
     "Middlesbrough": "米德尔斯堡",
@@ -95,11 +95,11 @@ TEAM_TRANSLATE = {
 
 # 联赛翻译字典
 LEAGUE_TRANSLATE = {
-    "Premier League": "英超",
-    "FA Cup": "足总杯",
-    "League Cup": "联赛杯",
-    "UEFA Champions League": "欧冠",
-    "UEFA Europa League": "欧联",
+    "Premier League": "英格兰超级联赛",
+    "FA Cup": "英格兰足总杯",
+    "League Cup": "英格兰联赛杯",
+    "UEFA Champions League": "欧洲冠军联赛",
+    "UEFA Europa League": "欧联杯",
     "UEFA Conference League": "欧协联"
 }
 
@@ -115,7 +115,7 @@ def cn_league(name: str) -> str:
 def main():
     url = "https://v3.football.api-sports.io/fixtures"
     headers = {
-        "x-apisports-key": API_KEY
+        "x-apisports-key": API_KEY.encode("ascii").decode("ascii")
     }
     params = {
         "team": TEAM_ID,
@@ -125,6 +125,13 @@ def main():
     resp = requests.get(url, headers=headers, params=params)
     resp.raise_for_status()
     data = resp.json()
+
+    match_count = len(data["response"])
+    print(f"API 返回比赛数量：{match_count}")
+
+    if match_count == 0:
+        print("错误：API 未返回任何比赛数据，请检查 season 参数或球队 ID")
+        sys.exit(1)
 
     cal = Calendar()
 
@@ -146,24 +153,29 @@ def main():
         goals_away = item["goals"]["away"]
 
         event = Event()
-        # 比赛结束状态：FT/AET/PEN，标题替换成分数；未开赛显示VS
         if status_short in ("FT", "AET", "PEN") and goals_home is not None and goals_away is not None:
-            event.name = f"{home_cn} {goals_home}‑{goals_away} {away_cn}"
+            event.name = f"{home_cn} {goals_home}-{goals_away} {away_cn}"
         else:
-            event.name = f"{home_cn} VS {away_cn}"
+            event.name = f"{home_cn} 对阵 {away_cn}"
 
         event.begin = match_start
         event.duration = timedelta(hours=2)
-        venue = fixture["venue"]["name"] if fixture["venue"] and fixture["venue"]["name"] else "未知球场"
+        
+        venue_name = "未知球场"
+        if fixture.get("venue") and fixture["venue"].get("name"):
+            venue_name = fixture["venue"]["name"]
+        
         event.description = (
             f"赛事：{league_cn}\n"
-            f"球场：{venue}\n"
+            f"球场：{venue_name}\n"
             f"比赛ID：{fixture['id']}"
         )
         cal.events.add(event)
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as fp:
-        fp.writelines(cal)
+        fp.write(str(cal))
+    
+    print(f"成功生成 {len(cal.events)} 场比赛的日历文件")
 
 
 if __name__ == "__main__":
