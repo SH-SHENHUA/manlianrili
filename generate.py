@@ -6,7 +6,7 @@ import sys
 # ==========配置区域==========
 API_KEY = "c57992dce30fc408d01e13b57ffd4a09"
 TEAM_ID = 33
-SEASON = 2026
+SEASON = 2025
 OUTPUT_FILE = "matches.ics"
 # ============================
 
