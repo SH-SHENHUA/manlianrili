@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import requests
 
 # ==========配置区域==========
-API_KEY = "粘贴你的api‑sports密钥到双引号内部，不要空格换行"
+API_KEY = "2ab7d451fdbe4e6d8c4503af82851b57"
 TEAM_ID = 40
 SEASON = 2026
 OUTPUT_FILE = "matches.ics"
