@@ -44,8 +44,8 @@ comp_map = {
 # ============================
 
 headers = {
-    "x‑rapidapi‑key": API_KEY,
-    "x‑rapidapi‑host": "api‑football‑v1.p.rapidapi.com"
+    "x-rapidapi-key": API_KEY,
+    "x-rapidapi-host": "api-football-v1.p.rapidapi.com"
 }
 
 def trans_team(name):
@@ -55,7 +55,7 @@ def trans_comp(name):
     return comp_map.get(name, name)
 
 def main():
-    url = "https://api‑football‑v1.p.rapidapi.com/fixtures"
+    url = "https://api-football-v1.p.rapidapi.com/fixtures"
     params = {"team": TEAM_ID, "season": 2026}
     resp = requests.get(url, headers=headers, params=params)
     resp.raise_for_status()
