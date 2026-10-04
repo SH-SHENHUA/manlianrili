@@ -46,6 +46,11 @@ TSS_CUPS = (
 )
 # 杯赛按轮次枚举；TheSportsDB 不同赛事的轮次编号不一致，所以扫一段范围。
 TSS_CUP_ROUNDS = tuple(range(1, 9))
+# TheSportsDB 的英超联赛 id：当 football-data.org 不可用时作为兜底来源。
+TSS_PL_LEAGUE_ID = "4328"
+TSS_PL_ROUNDS = tuple(range(1, 39))
+# 是否允许兜底（默认允许）。设为 0 则 football-data.org 不可用时直接失败。
+ALLOW_PL_FALLBACK = (os.environ.get("ALLOW_PL_FALLBACK") or "1") != "0"
 # 两次 TheSportsDB 请求之间的间隔（秒），避开其免费 key 的限流。
 TSS_DELAY_SECONDS = float(os.environ.get("THESPORTSDB_DELAY") or 6)
 
@@ -183,8 +188,12 @@ _NAME_SUFFIXES = (" FC", " AFC", " CF", " SC", " AC", " SV", " Club", " Football
 # ---------- 通用工具 ----------
 
 def norm_team(name: str) -> str:
-    """把不同数据源的队名归一化，用于翻译和跨源去重。"""
-    cleaned = (name or "").strip()
+    """把不同数据源的队名归一化，用于翻译和跨源去重。
+
+    注意 "&" 与 "and" 的差异：TheSportsDB 写 "Brighton and Hove Albion"，
+    football-data.org 写 "Brighton & Hove Albion FC"，不统一就会漏掉重复事件。
+    """
+    cleaned = (name or "").strip().replace(" & ", " and ")
     for prefix in _NAME_PREFIXES:
         if cleaned.startswith(prefix):
             cleaned = cleaned[len(prefix):]
@@ -337,65 +346,88 @@ def _tss_get(url: str):
     return None
 
 
+def _is_man_utd_tsdb(name: str) -> bool:
+    """TheSportsDB 里曼联就叫 Manchester United，用归一化后的全等判断。"""
+    return norm_team(name or "").lower() == "manchester united"
+
+
+def _tss_round_events(league_id: str, cn_name: str, rounds) -> list:
+    """按轮次枚举某赛事并抽出曼联的比赛。任何一轮失败就停止该赛事（返回已取到的部分）。"""
+    events = []
+    for rnd in rounds:
+        url = (
+            f"https://www.thesportsdb.com/api/v1/json/{THESPORTSDB_KEY}/eventsround.php"
+            f"?id={league_id}&r={rnd}&s={FD_SEASON}-{FD_SEASON + 1}"
+        )
+        data = _tss_get(url)
+        if not data:
+            break
+        for item in data.get("events") or []:
+            home = item.get("strHomeTeam") or ""
+            away = item.get("strAwayTeam") or ""
+            if not (_is_man_utd_tsdb(home) or _is_man_utd_tsdb(away)):
+                continue
+            stamp = (item.get("strTimestamp") or "").strip()
+            date_text = item.get("dateEvent")
+            time_text = item.get("strTime")
+            # TheSportsDB 的 strTimestamp / strTime 是 UTC（已用 openfootball 独立核对过）。
+            if stamp:
+                start = datetime.fromisoformat(stamp.replace("Z", ""))
+            elif date_text:
+                start = datetime.fromisoformat(f"{date_text}T{(time_text or '00:00:00')}")
+            else:
+                continue
+            start = start.replace(tzinfo=timezone.utc)
+
+            home_score, away_score = item.get("intHomeScore"), item.get("intAwayScore")
+            finished = home_score is not None and away_score is not None
+            events.append(
+                {
+                    "source": "thesportsdb",
+                    "key": f"tsdb-{item.get('idEvent')}",
+                    "start": start,
+                    "home": home,
+                    "away": away,
+                    "competition": cn_name,
+                    "venue": (item.get("strVenue") or "").strip(),
+                    "score": (int(home_score), int(away_score)) if finished else None,
+                    "state": FINISHED if finished else NOT_STARTED,
+                    "detail": f"比赛ID：{item.get('idEvent')}",
+                }
+            )
+    return events
+
+
 def fetch_thesportsdb_cups() -> list:
     events = []
     for league_id, cn_name in TSS_CUPS:
-        found = 0
-        for rnd in TSS_CUP_ROUNDS:
-            url = (
-                f"https://www.thesportsdb.com/api/v1/json/{THESPORTSDB_KEY}/eventsround.php"
-                f"?id={league_id}&r={rnd}&s={FD_SEASON}-{FD_SEASON + 1}"
-            )
-            data = _tss_get(url)
-            if not data:
-                break
-            for item in data.get("events") or []:
-                home = item.get("strHomeTeam") or ""
-                away = item.get("strAwayTeam") or ""
-                if "Manchester United" not in f"{home} {away}":
-                    continue
-                stamp = item.get("strTimestamp")
-                date_text = item.get("dateEvent")
-                time_text = item.get("strTime")
-                if stamp:
-                    start = datetime.fromisoformat(stamp.replace("Z", "").strip())
-                elif date_text:
-                    start = datetime.fromisoformat(f"{date_text}T{(time_text or '00:00:00')}")
-                else:
-                    continue
-                start = start.replace(tzinfo=timezone.utc)
-                home_score, away_score = item.get("intHomeScore"), item.get("intAwayScore")
-                finished = home_score is not None and away_score is not None
-                events.append(
-                    {
-                        "source": "thesportsdb",
-                        "key": f"tsdb-{item.get('idEvent')}",
-                        "start": start,
-                        "home": home,
-                        "away": away,
-                        "competition": cn_name,
-                        "venue": (item.get("strVenue") or "").strip(),
-                        "score": (int(home_score), int(away_score)) if finished else None,
-                        "state": FINISHED if finished else NOT_STARTED,
-                        "detail": f"比赛ID：{item.get('idEvent')}",
-                    }
-                )
-                found += 1
-        print(f"[thesportsdb] {cn_name} 找到曼联比赛 {found} 场")
+        found = _tss_round_events(league_id, cn_name, TSS_CUP_ROUNDS)
+        print(f"[thesportsdb] {cn_name} 找到曼联比赛 {len(found)} 场")
+        events.extend(found)
+    return events
+
+
+def fetch_thesportsdb_pl() -> list:
+    """兜底：从 TheSportsDB 按 38 轮枚举英超，取出曼联整季联赛赛程。"""
+    events = _tss_round_events(TSS_PL_LEAGUE_ID, "英格兰超级联赛", TSS_PL_ROUNDS)
+    print(f"[thesportsdb] 英超兜底找到曼联比赛 {len(events)} 场")
     return events
 
 
 # ---------- 合并 ----------
 
-def collect_events() -> list:
-    primary = fetch_football_data()
-    if not primary:
-        raise SystemExit(
-            f"错误：football-data.org 没有返回任何曼联比赛"
-            f"（已尝试 season={FD_SEASON} 与「当前赛季」两种取法），拒绝生成不完整的日历。\n"
-            f"请检查：token 是否有效、免费档是否包含 {'/'.join(c for c, _ in FD_COMPETITIONS)}、"
-            f"以及该赛季是否已经开始。"
-        )
+def collect_events():
+    """收集事件并合并去重。返回 (events, coverage_note)。
+
+    football-data.org 是主来源；它不可用时，若允许兜底，就用 TheSportsDB 的英超数据顶上，
+    并在日志与日历描述里明确标注这是降级结果（缺欧冠）。
+    """
+    primary = []
+    degraded = False
+    try:
+        primary = fetch_football_data()
+    except SystemExit as exc:
+        print(f"[警告] football-data.org 不可用：{exc}")
 
     try:
         supplement = fetch_thesportsdb_cups()
@@ -403,10 +435,32 @@ def collect_events() -> list:
         print(f"[thesportsdb] 补充杯赛时出错，已跳过：{type(exc).__name__}: {exc}")
         supplement = []
 
-    seen = {dedupe_key(e) for e in primary}
-    merged = list(primary)
+    fallback = []
+    if not primary:
+        if not ALLOW_PL_FALLBACK:
+            raise SystemExit(
+                f"错误：football-data.org 没有返回任何曼联比赛"
+                f"（已尝试 season={FD_SEASON} 与「当前赛季」），且已禁用兜底，拒绝生成不完整的日历。\n"
+                f"请检查：token 是否有效、免费档是否包含 "
+                f"{'/'.join(c for c, _ in FD_COMPETITIONS)}、以及该赛季是否已经开始。\n"
+                f"（想先用 TheSportsDB 的英超数据兜底，去掉 ALLOW_PL_FALLBACK=0 即可。）"
+            )
+        degraded = True
+        print("=" * 62)
+        print("[警告] 正在进行降级运行：改用 TheSportsDB 的英超数据。")
+        print("[警告] 此结果只含英超 + TheSportsDB 能提供的杯赛，缺少欧冠。")
+        print(f"[警告] 配置 FOOTBALL_DATA_TOKEN 后会自动恢复完整数据。")
+        print("=" * 62)
+        try:
+            fallback = fetch_thesportsdb_pl()
+        except Exception as exc:
+            print(f"[thesportsdb] 英超兜底出错：{type(exc).__name__}: {exc}")
+            fallback = []
+
+    seen = set()
+    merged = []
     skipped = 0
-    for event in supplement:
+    for event in list(primary) + list(fallback) + list(supplement):
         key = dedupe_key(event)
         if key in seen:
             skipped += 1
@@ -414,13 +468,32 @@ def collect_events() -> list:
         seen.add(key)
         merged.append(event)
 
+    if not merged:
+        raise SystemExit(
+            "错误：所有数据源都没有取到任何比赛，拒绝写出空日历。"
+            "请检查 token / 网络 / 赛季配置。"
+        )
+
     print(
         f"合并后共 {len(merged)} 场"
-        f"（football-data {len(primary)} 场，TheSportsDB 补充 {len(merged) - len(primary)} 场，"
-        f"去重丢弃 {skipped} 场）"
+        f"（football-data {len(primary)} 场，TheSportsDB 英超兜底 {len(fallback)} 场，"
+        f"TheSportsDB 杯赛 {len(supplement)} 场，去重丢弃 {skipped} 场）"
     )
     merged.sort(key=lambda e: e["start"])
-    return merged
+
+    competitions = []
+    for event in merged:
+        if event["competition"] not in competitions:
+            competitions.append(event["competition"])
+    sources = []
+    for event in merged:
+        if event["source"] not in sources:
+            sources.append(event["source"])
+    note = f"数据来源：{' + '.join(sources)}；覆盖：{'、'.join(competitions)}"
+    if degraded:
+        note += "（降级运行：未配置 FOOTBALL_DATA_TOKEN，缺少欧冠）"
+    print(f"[覆盖] {note}")
+    return merged, note
 
 
 # ---------- 写 iCalendar ----------
@@ -501,7 +574,7 @@ def build_event(event, stamp: str) -> list:
     ]
 
 
-def build_calendar(events, stamp: str) -> str:
+def build_calendar(events, stamp: str, calendar_note: str = "") -> str:
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -511,6 +584,9 @@ def build_calendar(events, stamp: str) -> str:
         f"X-WR-CALNAME:{escape_text(CALENDAR_NAME)}",
         "X-WR-TIMEZONE:Asia/Shanghai",
     ]
+    if calendar_note:
+        # 写进日历描述：在 iPhone 上也能看到覆盖范围与数据来源，降级运行不会是"静默"的。
+        lines.append(f"X-WR-CALDESC:{escape_text(calendar_note)}")
     for event in events:
         lines.extend(build_event(event, stamp))
     lines.append("END:VCALENDAR")
@@ -518,10 +594,10 @@ def build_calendar(events, stamp: str) -> str:
 
 
 def main():
-    events = collect_events()
+    events, calendar_note = collect_events()
 
     stamp = utc_stamp(datetime.now(timezone.utc))
-    ics = build_calendar(events, stamp)
+    ics = build_calendar(events, stamp, calendar_note)
 
     if ics.count("BEGIN:VEVENT") == 0:
         raise SystemExit("错误：生成的日历里没有任何事件，拒绝写出空日历")
