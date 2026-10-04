@@ -241,9 +241,11 @@ def build_event(item: dict, stamp: str) -> list:
     goals_away = (item.get("goals") or {}).get("away")
 
     if status_short in FINISHED_STATUS and goals_home is not None and goals_away is not None:
+        # 已结束：主队 比分 客队
         summary = f"{home_cn} {goals_home}-{goals_away} {away_cn}"
     else:
-        summary = f"{home_cn} 对阵 {away_cn}"
+        # 未进行：主队 VS 客队
+        summary = f"{home_cn} VS {away_cn}"
 
     venue_name = "未知球场"
     venue = fixture.get("venue") or {}
