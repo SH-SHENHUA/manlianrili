@@ -20,6 +20,9 @@
 
 两个来源的结果会**按「日期 + 主队 + 客队」合并去重**，重复时保留 football-data.org 的版本。
 
+> football-data.org 免费档（10 次/分钟，12 个赛事）官方标注「比分与赛程更新有延迟」。
+> 由于本日历每 8 小时才更新一次，这个延迟不影响使用。
+
 ### 必填：配置 football-data.org token
 
 1. 到 <https://www.football-data.org/client/register> 免费注册，邮箱里会收到 token；
