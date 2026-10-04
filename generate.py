@@ -568,6 +568,11 @@ def utc_stamp(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _now_utc() -> datetime:
+    """DTSTAMP 的时间源。单独抽出来是为了能在测试里注入固定时间。"""
+    return datetime.now(timezone.utc)
+
+
 def build_event(event, stamp: str) -> list:
     start = event["start"].astimezone(timezone.utc)
     end = start + timedelta(hours=2)
@@ -624,20 +629,45 @@ def build_calendar(events, stamp: str, calendar_note: str = "") -> str:
     return CRLF.join(fold_line(line) for line in lines) + CRLF
 
 
+def _same_ignoring_dtstamp(existing: str, fresh: str) -> bool:
+    """比较两份日历的内容是否一致（忽略 DTSTAMP）。
+
+    每次运行 DTSTAMP 都会变。如果比赛内容其实没变，就没必要改写文件——
+    否则工作流每 8 小时都会产生一次无意义的自动提交（约 90 次/月）。
+    一旦进球/改期导致内容变化，比较就会不等，照常改写并刷新 DTSTAMP。
+    """
+
+    def strip(text: str) -> str:
+        return CRLF.join(line for line in text.split(CRLF) if not line.startswith("DTSTAMP:"))
+
+    return strip(existing) == strip(fresh)
+
+
 def main():
     events, calendar_note = collect_events()
 
-    stamp = utc_stamp(datetime.now(timezone.utc))
+    stamp = utc_stamp(_now_utc())
     ics = build_calendar(events, stamp, calendar_note)
 
     if ics.count("BEGIN:VEVENT") == 0:
         raise SystemExit("错误：生成的日历里没有任何事件，拒绝写出空日历")
 
-    with open(OUTPUT_FILE, "w", encoding="utf-8", newline="") as fp:
-        fp.write(ics)
+    unchanged = False
+    if os.path.exists(OUTPUT_FILE):
+        with open(OUTPUT_FILE, encoding="utf-8", newline="") as fp:
+            existing = fp.read()
+        unchanged = _same_ignoring_dtstamp(existing, ics)
+
+    if unchanged:
+        print(f"{OUTPUT_FILE} 的比赛内容与上次一致（仅 DTSTAMP 不同），跳过写入，避免无意义的自动提交")
+    else:
+        # newline="" 避免 Windows 上把 CRLF 再翻译成 CRCRLF。
+        with open(OUTPUT_FILE, "w", encoding="utf-8", newline="") as fp:
+            fp.write(ics)
 
     upcoming = sum(1 for e in events if e["state"] == NOT_STARTED)
-    print(f"成功生成 {len(events)} 场比赛（其中未进行 {upcoming} 场）-> {OUTPUT_FILE}")
+    print(f"共 {len(events)} 场比赛（其中未进行 {upcoming} 场）-> {OUTPUT_FILE}"
+          + ("（内容未变化，未改写）" if unchanged else "（已更新）"))
 
 
 if __name__ == "__main__":
