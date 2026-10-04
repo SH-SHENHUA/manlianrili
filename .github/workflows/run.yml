@@ -27,6 +27,11 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run script
+        env:
+          # football-data.org 免费 token，请在仓库 Settings -> Secrets 里添加同名 Secret
+          FOOTBALL_DATA_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
+          # 可选：TheSportsDB 的 key，不设则用公开的免费 key "123"
+          THESPORTSDB_KEY: ${{ secrets.THESPORTSDB_KEY }}
         run: python generate.py
 
       - name: Validate ics for iPhone import

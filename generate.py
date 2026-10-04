@@ -1,33 +1,55 @@
 #!/usr/bin/env python3
-"""生成曼联赛程的 iCalendar(.ics) 文件。
+"""生成曼联一线队赛程的 iCalendar(.ics) 文件。
 
-本文件负责两件事：
-1. 从 API-Sports 取曼联的比赛数据。免费套餐只开放 season 2022-2024，
-   但会把请求当 HTTP 200 正常返回、只在 ``errors.plan`` 里说明拒绝原因，
-   所以这里从配置赛季开始逐个向前回退，取到数据为止，并把 API 的错误原样打出来。
-2. 按 RFC 5545 自己写出 .ics（不再依赖 ics.py），保证 iOS 日历能导入：
-   - CRLF 行尾，且文件以 CRLF 结束；
-   - UTF-8 无 BOM；
-   - 超过 75 字节的行按 UTF-8 字符边界折行；
-   - 每个 VEVENT 都带 RFC 必填的 UID / DTSTAMP / DTSTART / DTEND；
-   - UID 由比赛 ID 稳定派生，重复导入是更新而不是新增重复事件。
+数据来源（两条互补，合并后去重）：
+1. football-data.org —— 免费档覆盖英超与欧冠，含球场(venue)、比分、UTC 时间。
+   需要免费 token，通过环境变量 FOOTBALL_DATA_TOKEN 注入（GitHub Actions Secret）。
+2. TheSportsDB —— 免费 key，用于补充 football-data.org 免费档**不覆盖**的杯赛
+   （足总杯 / 联赛杯 / 欧联杯 / 欧协联），按轮次枚举。
+
+输出按 RFC 5545 自己写出，保证 iOS 日历能导入：
+CRLF 行尾且以 CRLF 结束、UTF-8 无 BOM、75 字节折行（不切断多字节字符）、
+每个 VEVENT 都带必填的 UID / DTSTAMP / DTSTART / DTEND，UID 稳定派生。
+
+比赛标题：未进行 = 主队 VS 客队；已结束 = 主队 比分 客队。
+每个事件时长固定 2 小时，LOCATION 为比赛球场。
 """
 
 import os
+import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
 
 # ==========配置区域==========
-# 建议把 key 放进 GitHub Actions Secret，并以环境变量 APISPORTS_KEY 注入。
-API_KEY = os.environ.get("APISPORTS_KEY", "c57992dce30fc408d01e13b57ffd4a09")
-TEAM_ID = 33
-# 期望使用的赛季（起始年份）。若当前套餐不允许，会自动向前回退。
-SEASON = 2026
-# 最多向前回退多少个赛季。
-SEASON_FALLBACK_YEARS = 6
-OUTPUT_FILE = "matches.ics"
+# football-data.org 免费 token（必填）：注册后放到 Actions Secret，用环境变量注入。
+FOOTBALL_DATA_TOKEN = (os.environ.get("FOOTBALL_DATA_TOKEN") or "").strip()
+# football-data.org 里的曼联 id 和赛季起始年。
+FD_TEAM_ID = 66
+FD_SEASON = 2026
+# 免费档覆盖的赛事：(赛事代码, 中文名)
+FD_COMPETITIONS = (
+    ("PL", "英格兰超级联赛"),
+    ("CL", "欧洲冠军联赛"),
+)
+
+# TheSportsDB 免费 key 与需要补的杯赛（联赛 id -> 中文名）。
+# 注意用 or 兜底：GitHub Actions 里未配置的 Secret 会变成空字符串。
+THESPORTSDB_KEY = (os.environ.get("THESPORTSDB_KEY") or "123").strip()
+TSS_CUPS = (
+    ("4482", "英格兰足总杯"),
+    ("4570", "英格兰联赛杯"),
+    ("4481", "欧联杯"),
+    ("5071", "欧协联"),
+)
+# 杯赛按轮次枚举；TheSportsDB 不同赛事的轮次编号不一致，所以扫一段范围。
+TSS_CUP_ROUNDS = tuple(range(1, 9))
+# 两次 TheSportsDB 请求之间的间隔（秒），避开其免费 key 的限流。
+TSS_DELAY_SECONDS = float(os.environ.get("THESPORTSDB_DELAY") or 6)
+
+OUTPUT_FILE = (os.environ.get("OUTPUT_FILE") or "matches.ics").strip()
 CALENDAR_NAME = "曼联赛程"
 # ============================
 
@@ -38,19 +60,27 @@ TEAM_TRANSLATE = {
     "Arsenal": "阿森纳",
     "Chelsea": "切尔西",
     "Manchester City": "曼城",
+    "Tottenham Hotspur": "托特纳姆热刺",
     "Tottenham": "托特纳姆热刺",
+    "Newcastle United": "纽卡斯尔联",
     "Newcastle": "纽卡斯尔联",
     "Aston Villa": "阿斯顿维拉",
+    "Brighton & Hove Albion": "布莱顿",
+    "Brighton and Hove Albion": "布莱顿",
     "Brighton": "布莱顿",
     "Crystal Palace": "水晶宫",
     "Everton": "埃弗顿",
     "Nottingham Forest": "诺丁汉森林",
+    "West Ham United": "西汉姆联",
     "West Ham": "西汉姆联",
     "Bournemouth": "伯恩茅斯",
     "Fulham": "富勒姆",
+    "Wolverhampton Wanderers": "狼队",
     "Wolves": "狼队",
     "Southampton": "南安普顿",
+    "Leicester City": "莱斯特城",
     "Leicester": "莱斯特城",
+    "Ipswich Town": "伊普斯维奇",
     "Ipswich": "伊普斯维奇",
     "Brentford": "布伦特福德",
     "Leeds United": "利兹联",
@@ -78,9 +108,11 @@ TEAM_TRANSLATE = {
     "Real Madrid": "皇家马德里",
     "Barcelona": "巴塞罗那",
     "Atletico Madrid": "马德里竞技",
+    "Atlético Madrid": "马德里竞技",
     "Sevilla": "塞维利亚",
     "Real Sociedad": "皇家社会",
     "Villarreal": "比利亚雷亚尔",
+    "Real Betis": "皇家贝蒂斯",
     "Betis": "皇家贝蒂斯",
     "Bayern Munich": "拜仁慕尼黑",
     "Borussia Dortmund": "多特蒙德",
@@ -89,20 +121,27 @@ TEAM_TRANSLATE = {
     "Eintracht Frankfurt": "法兰克福",
     "Freiburg": "弗赖堡",
     "Union Berlin": "柏林联合",
+    "Stuttgart": "斯图加特",
     "Juventus": "尤文图斯",
     "Inter Milan": "国际米兰",
+    "Inter": "国际米兰",
     "AC Milan": "AC米兰",
+    "Milan": "AC米兰",
     "Napoli": "那不勒斯",
     "Roma": "罗马",
     "Lazio": "拉齐奥",
     "Atalanta": "亚特兰大",
     "Fiorentina": "佛罗伦萨",
+    "Como": "科莫",
     "Paris Saint-Germain": "巴黎圣日耳曼",
+    "Paris FC": "巴黎FC",
     "Monaco": "摩纳哥",
     "Marseille": "马赛",
     "Lyon": "里昂",
+    "Lille": "里尔",
     "Benfica": "本菲卡",
     "Porto": "波尔图",
+    "Sporting CP": "葡萄牙体育",
     "Ajax": "阿贾克斯",
     "PSV Eindhoven": "埃因霍温",
     "Feyenoord": "费耶诺德",
@@ -110,77 +149,238 @@ TEAM_TRANSLATE = {
     "Rangers": "格拉斯哥流浪者",
     "Club Brugge": "布鲁日",
     "Galatasaray": "加拉塔萨雷",
+    "Fenerbahçe": "费内巴切",
     "Fenerbahce": "费内巴切",
-    "Olympiacos": "奥林匹亚科斯"
+    "Olympiacos": "奥林匹亚科斯",
+    "Slavia Prague": "布拉格斯拉维亚",
+    "Shakhtar Donetsk": "顿涅茨克矿工",
+    "Lens": "朗斯",
+    "Bodø/Glimt": "博多闪耀",
+    "Slovan Bratislava": "布拉迪斯拉发斯拉夫人",
+    "Viking": "维京",
+    "LASK": "林茨",
+    "AEK Athens": "雅典AEK",
+    "Sabah Baku": "萨巴巴库",
+    "Barnsley": "巴恩斯利",
 }
 
-# 联赛翻译字典
-LEAGUE_TRANSLATE = {
-    "Premier League": "英格兰超级联赛",
-    "FA Cup": "英格兰足总杯",
-    "League Cup": "英格兰联赛杯",
-    "UEFA Champions League": "欧洲冠军联赛",
-    "UEFA Europa League": "欧联杯",
-    "UEFA Conference League": "欧协联"
-}
+# football-data.org 的比赛状态
+FD_FINISHED_STATUS = ("FINISHED", "AWARDED")
+FD_SKIP_STATUS = ("CANCELLED",)
 
-# API-Sports 的比赛状态：已结束 / 已取消
-FINISHED_STATUS = ("FT", "AET", "PEN")
-CANCELLED_STATUS = ("PST", "CANC", "ABD", "AWD", "WO", "SUSP", "INT")
+FINISHED = "finished"
+NOT_STARTED = "not_started"
+CANCELLED = "cancelled"
 
 CRLF = "\r\n"
 MAX_LINE_OCTETS = 75
 
+# 用于跨数据源对齐队名的后缀/前缀
+_NAME_PREFIXES = ("AFC ", "FC ", "AS ", "AC ", "SV ", "SK ")
+_NAME_SUFFIXES = (" FC", " AFC", " CF", " SC", " AC", " SV", " Club", " Football Club")
+
+
+# ---------- 通用工具 ----------
+
+def norm_team(name: str) -> str:
+    """把不同数据源的队名归一化，用于翻译和跨源去重。"""
+    cleaned = (name or "").strip()
+    for prefix in _NAME_PREFIXES:
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):]
+    for suffix in _NAME_SUFFIXES:
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)]
+    return re.sub(r"\s+", " ", cleaned).strip()
+
 
 def cn_team(name: str) -> str:
-    return TEAM_TRANSLATE.get(name, name)
+    cleaned = norm_team(name)
+    if cleaned in TEAM_TRANSLATE:
+        return TEAM_TRANSLATE[cleaned]
+    lowered = cleaned.lower()
+    for key, value in TEAM_TRANSLATE.items():
+        if key.lower() == lowered:
+            return value
+    for key, value in TEAM_TRANSLATE.items():
+        if lowered.startswith(key.lower()) or key.lower().startswith(lowered):
+            return value
+    return cleaned
 
 
-def cn_league(name: str) -> str:
-    return LEAGUE_TRANSLATE.get(name, name)
+def dedupe_key(event) -> tuple:
+    return (
+        event["start"].astimezone(timezone.utc).date().isoformat(),
+        norm_team(event["home"]).lower(),
+        norm_team(event["away"]).lower(),
+    )
 
 
-# ---------- 取数据 ----------
+# ---------- 数据源 1：football-data.org ----------
 
-def fetch_fixtures():
-    """返回 (season, fixtures)。从 SEASON 起向前回退，直到取到比赛数据。"""
-    url = "https://v3.football.api-sports.io/fixtures"
-    headers = {"x-apisports-key": API_KEY}
-    last_problem = "尚未请求"
+def fetch_football_data() -> list:
+    if not FOOTBALL_DATA_TOKEN:
+        raise SystemExit(
+            "错误：缺少 FOOTBALL_DATA_TOKEN。\n"
+            "请到 https://www.football-data.org/client/register 免费注册并取得 token，\n"
+            "然后在本机设为环境变量，或在 GitHub 仓库里加 Actions Secret（名字用 FOOTBALL_DATA_TOKEN）。"
+        )
 
-    for season in range(SEASON, SEASON - SEASON_FALLBACK_YEARS, -1):
-        params = {"team": TEAM_ID, "season": season}
+    headers = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
+    events = []
+    for code, cn_name in FD_COMPETITIONS:
+        url = f"https://api.football-data.org/v4/competitions/{code}/matches"
+        params = {"season": FD_SEASON}
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            resp = requests.get(url, headers=headers, params=params, timeout=40)
             resp.raise_for_status()
         except requests.RequestException as exc:
-            # 一定要让 CI 失败，并且不要写出任何文件，避免把坏日历推到仓库里。
             raise SystemExit(
-                f"错误：请求 API 失败（{exc}）。常见原因：API key 无效或被禁用、"
-                f"超出每日请求额度、网络不可达。"
+                f"错误：请求 football-data.org 失败（{exc}）。"
+                f"常见原因：token 无效、免费档不含该赛事、超出 10 次/分钟的限制。"
             )
-        data = resp.json()
+        payload = resp.json()
+        matches = payload.get("matches") or []
+        print(f"[football-data] {cn_name}({code}) season={FD_SEASON} 返回 {len(matches)} 场")
 
-        # 套餐限制、参数错误等都以 HTTP 200 + errors 返回，必须显式检查。
-        errors = data.get("errors")
-        fixtures = data.get("response") or []
+        for match in matches:
+            home_id = (match.get("homeTeam") or {}).get("id")
+            away_id = (match.get("awayTeam") or {}).get("id")
+            if FD_TEAM_ID not in (home_id, away_id):
+                continue
+            status = match.get("status")
+            if status in FD_SKIP_STATUS:
+                continue
+            score = ((match.get("score") or {}).get("fullTime") or {})
+            finished = status in FD_FINISHED_STATUS and score.get("home") is not None
+            if status == "POSTPONED":
+                state = NOT_STARTED
+            elif finished:
+                state = FINISHED
+            else:
+                state = NOT_STARTED
+            events.append(
+                {
+                    "source": "football-data",
+                    "key": f"fd-{match['id']}",
+                    "start": datetime.fromisoformat(match["utcDate"].replace("Z", "+00:00")),
+                    "home": (match["homeTeam"] or {}).get("name") or "?",
+                    "away": (match["awayTeam"] or {}).get("name") or "?",
+                    "competition": cn_name,
+                    "venue": (match.get("venue") or "").strip(),
+                    "score": (score.get("home"), score.get("away")) if finished else None,
+                    "state": state,
+                    "detail": f"比赛ID：{match['id']}",
+                }
+            )
+    return events
 
-        if errors:
-            last_problem = f"season={season} 被 API 拒绝：{errors}"
-            print(f"[跳过] {last_problem}")
+
+# ---------- 数据源 2：TheSportsDB（补杯赛） ----------
+
+def _tss_get(url: str):
+    """带限流退避的 GET；失败返回 None（杯赛是补充，缺了不应让整次运行失败）。"""
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(url, timeout=40, headers={"User-Agent": "manlianrili-calendar/1.0"})
+            if resp.status_code == 429:
+                wait = 20 * attempt
+                print(f"[thesportsdb] 被限流，等 {wait}s 后重试")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            time.sleep(TSS_DELAY_SECONDS)
+            return resp.json()
+        except requests.RequestException as exc:
+            print(f"[thesportsdb] 请求失败：{exc}")
+            time.sleep(TSS_DELAY_SECONDS)
+            return None
+    print("[thesportsdb] 重试仍被限流，跳过")
+    return None
+
+
+def fetch_thesportsdb_cups() -> list:
+    events = []
+    for league_id, cn_name in TSS_CUPS:
+        found = 0
+        for rnd in TSS_CUP_ROUNDS:
+            url = (
+                f"https://www.thesportsdb.com/api/v1/json/{THESPORTSDB_KEY}/eventsround.php"
+                f"?id={league_id}&r={rnd}&s={FD_SEASON}-{FD_SEASON + 1}"
+            )
+            data = _tss_get(url)
+            if not data:
+                break
+            for item in data.get("events") or []:
+                home = item.get("strHomeTeam") or ""
+                away = item.get("strAwayTeam") or ""
+                if "Manchester United" not in f"{home} {away}":
+                    continue
+                stamp = item.get("strTimestamp")
+                date_text = item.get("dateEvent")
+                time_text = item.get("strTime")
+                if stamp:
+                    start = datetime.fromisoformat(stamp.replace("Z", "").strip())
+                elif date_text:
+                    start = datetime.fromisoformat(f"{date_text}T{(time_text or '00:00:00')}")
+                else:
+                    continue
+                start = start.replace(tzinfo=timezone.utc)
+                home_score, away_score = item.get("intHomeScore"), item.get("intAwayScore")
+                finished = home_score is not None and away_score is not None
+                events.append(
+                    {
+                        "source": "thesportsdb",
+                        "key": f"tsdb-{item.get('idEvent')}",
+                        "start": start,
+                        "home": home,
+                        "away": away,
+                        "competition": cn_name,
+                        "venue": (item.get("strVenue") or "").strip(),
+                        "score": (int(home_score), int(away_score)) if finished else None,
+                        "state": FINISHED if finished else NOT_STARTED,
+                        "detail": f"比赛ID：{item.get('idEvent')}",
+                    }
+                )
+                found += 1
+        print(f"[thesportsdb] {cn_name} 找到曼联比赛 {found} 场")
+    return events
+
+
+# ---------- 合并 ----------
+
+def collect_events() -> list:
+    primary = fetch_football_data()
+    if not primary:
+        raise SystemExit(
+            f"错误：football-data.org 在 season={FD_SEASON} 没返回任何曼联比赛，"
+            f"拒绝生成不完整的日历。"
+        )
+
+    try:
+        supplement = fetch_thesportsdb_cups()
+    except Exception as exc:  # 杯赛是补充来源，失败不应导致整次运行失败
+        print(f"[thesportsdb] 补充杯赛时出错，已跳过：{type(exc).__name__}: {exc}")
+        supplement = []
+
+    seen = {dedupe_key(e) for e in primary}
+    merged = list(primary)
+    skipped = 0
+    for event in supplement:
+        key = dedupe_key(event)
+        if key in seen:
+            skipped += 1
             continue
-        if not fixtures:
-            last_problem = f"season={season} 返回 0 场比赛"
-            print(f"[跳过] {last_problem}")
-            continue
+        seen.add(key)
+        merged.append(event)
 
-        print(f"[使用] season={season}，共 {len(fixtures)} 场比赛")
-        return season, fixtures
-
-    raise SystemExit(
-        f"错误：从 {SEASON} 起连续 {SEASON_FALLBACK_YEARS} 个赛季都没取到数据。"
-        f"最后一条原因：{last_problem}"
+    print(
+        f"合并后共 {len(merged)} 场"
+        f"（football-data {len(primary)} 场，TheSportsDB 补充 {len(merged) - len(primary)} 场，"
+        f"去重丢弃 {skipped} 场）"
     )
+    merged.sort(key=lambda e: e["start"])
+    return merged
 
 
 # ---------- 写 iCalendar ----------
@@ -212,57 +412,39 @@ def fold_line(line: str) -> str:
     limit = MAX_LINE_OCTETS
     while start < len(data):
         end = min(start + limit, len(data))
-        # 不要把一个多字节字符切成两半。
         while end > start and end < len(data) and (data[end] & 0xC0) == 0x80:
             end -= 1
         chunks.append(data[start:end].decode("utf-8"))
         start = end
         limit = MAX_LINE_OCTETS - 1  # 续行首的空格占 1 字节
-
     return (CRLF + " ").join(chunks)
 
 
 def utc_stamp(moment: datetime) -> str:
-    """RFC 5545 UTC 时间：YYYYMMDDTHHMMSSZ。"""
     return moment.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def build_event(item: dict, stamp: str) -> list:
-    fixture = item["fixture"]
-    home_cn = cn_team(item["teams"]["home"]["name"])
-    away_cn = cn_team(item["teams"]["away"]["name"])
-    league_cn = cn_league(item["league"]["name"])
-
-    start = datetime.fromisoformat(fixture["date"].replace("Z", "+00:00"))
+def build_event(event, stamp: str) -> list:
+    start = event["start"].astimezone(timezone.utc)
     end = start + timedelta(hours=2)
 
-    status_short = (fixture.get("status") or {}).get("short", "")
-    goals_home = (item.get("goals") or {}).get("home")
-    goals_away = (item.get("goals") or {}).get("away")
+    home_cn = cn_team(event["home"])
+    away_cn = cn_team(event["away"])
 
-    if status_short in FINISHED_STATUS and goals_home is not None and goals_away is not None:
-        # 已结束：主队 比分 客队
-        summary = f"{home_cn} {goals_home}-{goals_away} {away_cn}"
+    if event["state"] == FINISHED and event.get("score"):
+        summary = f"{home_cn} {event['score'][0]}-{event['score'][1]} {away_cn}"
     else:
-        # 未进行：主队 VS 客队
         summary = f"{home_cn} VS {away_cn}"
 
-    venue_name = "未知球场"
-    venue = fixture.get("venue") or {}
-    if venue.get("name"):
-        venue_name = venue["name"]
-        if venue.get("city"):
-            venue_name = f"{venue_name}（{venue['city']}）"
-
+    venue = event.get("venue") or "待定球场"
     description = (
-        f"赛事：{league_cn}\n"
-        f"球场：{venue_name}\n"
-        f"比赛ID：{fixture['id']}"
-    )
+        f"赛事：{event['competition']}\n"
+        f"球场：{venue}\n"
+        f"{event.get('detail', '')}"
+    ).rstrip()
 
-    # UID 由比赛 ID 派生：同一次导入/重复导入会更新同一事件，而不是产生重复条目。
-    uid = f"fixture-{fixture['id']}@manlianrili"
-    event_status = "CANCELLED" if status_short in CANCELLED_STATUS else "CONFIRMED"
+    uid = f"{event['key']}@manlianrili"
+    status = "CANCELLED" if event["state"] == CANCELLED else "CONFIRMED"
 
     return [
         "BEGIN:VEVENT",
@@ -271,15 +453,15 @@ def build_event(item: dict, stamp: str) -> list:
         f"DTSTART:{utc_stamp(start)}",
         f"DTEND:{utc_stamp(end)}",
         f"SUMMARY:{escape_text(summary)}",
-        f"LOCATION:{escape_text(venue_name)}",
+        f"LOCATION:{escape_text(venue)}",
         f"DESCRIPTION:{escape_text(description)}",
-        f"STATUS:{event_status}",
+        f"STATUS:{status}",
         "TRANSP:OPAQUE",
         "END:VEVENT",
     ]
 
 
-def build_calendar(items, stamp: str) -> str:
+def build_calendar(events, stamp: str) -> str:
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -289,27 +471,26 @@ def build_calendar(items, stamp: str) -> str:
         f"X-WR-CALNAME:{escape_text(CALENDAR_NAME)}",
         "X-WR-TIMEZONE:Asia/Shanghai",
     ]
-    for item in items:
-        lines.extend(build_event(item, stamp))
+    for event in events:
+        lines.extend(build_event(event, stamp))
     lines.append("END:VCALENDAR")
-
     return CRLF.join(fold_line(line) for line in lines) + CRLF
 
 
 def main():
-    season, fixtures = fetch_fixtures()
+    events = collect_events()
 
     stamp = utc_stamp(datetime.now(timezone.utc))
-    ics = build_calendar(fixtures, stamp)
+    ics = build_calendar(events, stamp)
 
     if ics.count("BEGIN:VEVENT") == 0:
         raise SystemExit("错误：生成的日历里没有任何事件，拒绝写出空日历")
 
-    # newline="" 避免 Windows 上把 CRLF 再翻译成 CRCRLF。
     with open(OUTPUT_FILE, "w", encoding="utf-8", newline="") as fp:
         fp.write(ics)
 
-    print(f"成功生成 {len(fixtures)} 场比赛的日历文件 {OUTPUT_FILE}（season={season}）")
+    upcoming = sum(1 for e in events if e["state"] == NOT_STARTED)
+    print(f"成功生成 {len(events)} 场比赛（其中未进行 {upcoming} 场）-> {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
