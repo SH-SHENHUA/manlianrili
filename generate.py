@@ -483,9 +483,13 @@ def collect_events():
         merged.append(event)
 
     if not merged:
+        detail = ""
+        if TSS_FAILURES:
+            detail = ("\nTheSportsDB 失败记录（限流或网络问题会让所有赛事都取不到；"
+                      "其免费 key 有较严的 Cloudflare 限流）：\n  - " + "\n  - ".join(TSS_FAILURES[:5]))
         raise SystemExit(
             "错误：所有数据源都没有取到任何比赛，拒绝写出空日历。"
-            "请检查 token / 网络 / 赛季配置。"
+            "请检查 token / 网络 / 赛季配置。" + detail
         )
 
     print(
