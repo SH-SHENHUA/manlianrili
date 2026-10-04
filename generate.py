@@ -35,17 +35,24 @@ FD_COMPETITIONS = (
     ("CL", "欧洲冠军联赛"),
 )
 
-# TheSportsDB 免费 key 与需要补的杯赛（联赛 id -> 中文名）。
-# 注意用 or 兜底：GitHub Actions 里未配置的 Secret 会变成空字符串。
+# TheSportsDB 免费 key。注意用 or 兜底：GitHub Actions 里未配置的 Secret 会变成空字符串。
 THESPORTSDB_KEY = (os.environ.get("THESPORTSDB_KEY") or "123").strip()
+
+# TheSportsDB 需要补的杯赛：(联赛 id, 中文名, 扫描轮次)
+#
+# 轮次窗口是实测出来的，不是猜的：
+# - 足总杯：该库的 intRound 是从**资格赛**连续编号的（2026/27 实测 r1=9/4、r2=9/18、r3=10/3），
+#   而曼联从**第三轮正赛**（2027 年 1 月）才入场，按节奏大约落在 r7~r9。
+#   窗口留到 r12，否则会永久漏掉足总杯。
+# - 联赛杯：该库对本赛季没有任何轮次数据（2026/27 实测 r1~r12 全空；
+#   2024/25 也只在 r1~r3 有数据），保留小窗口以便将来出现时能补上。
+# - 欧联/欧协联：曼联若参赛，联赛阶段通常落在前 10 轮内。
 TSS_CUPS = (
-    ("4482", "英格兰足总杯"),
-    ("4570", "英格兰联赛杯"),
-    ("4481", "欧联杯"),
-    ("5071", "欧协联"),
+    ("4482", "英格兰足总杯", tuple(range(1, 13))),
+    ("4570", "英格兰联赛杯", tuple(range(1, 7))),
+    ("4481", "欧联杯", tuple(range(1, 11))),
+    ("5071", "欧协联", tuple(range(1, 11))),
 )
-# 杯赛按轮次枚举；TheSportsDB 不同赛事的轮次编号不一致，所以扫一段范围。
-TSS_CUP_ROUNDS = tuple(range(1, 9))
 # TheSportsDB 的英超联赛 id：当 football-data.org 不可用时作为兜底来源。
 TSS_PL_LEAGUE_ID = "4328"
 TSS_PL_ROUNDS = tuple(range(1, 39))
@@ -410,9 +417,9 @@ def _tss_round_events(league_id: str, cn_name: str, rounds) -> list:
 
 def fetch_thesportsdb_cups() -> list:
     events = []
-    for league_id, cn_name in TSS_CUPS:
-        found = _tss_round_events(league_id, cn_name, TSS_CUP_ROUNDS)
-        print(f"[thesportsdb] {cn_name} 找到曼联比赛 {len(found)} 场")
+    for league_id, cn_name, rounds in TSS_CUPS:
+        found = _tss_round_events(league_id, cn_name, rounds)
+        print(f"[thesportsdb] {cn_name} 扫 {len(rounds)} 轮，找到曼联比赛 {len(found)} 场")
         events.extend(found)
     return events
 
