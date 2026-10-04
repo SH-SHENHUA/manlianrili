@@ -326,10 +326,15 @@ def fetch_football_data() -> list:
     return events
 
 
-# ---------- 数据源 2：TheSportsDB（补杯赛） ----------
+# ---------- 数据源 2：TheSportsDB（补杯赛 / 兜底） ----------
+
+# 记录失败的请求。TheSportsDB 免费 key 限流很严，一旦某轮取不到，
+# 该赛事的覆盖就不完整——这一点必须让日志和日历描述都体现出来，不能静默。
+TSS_FAILURES = []
+
 
 def _tss_get(url: str):
-    """带限流退避的 GET；失败返回 None（杯赛是补充，缺了不应让整次运行失败）。"""
+    """带限流退避的 GET；失败返回 None 并记录，便于判断覆盖是否完整。"""
     for attempt in range(1, 4):
         try:
             resp = requests.get(url, timeout=40, headers={"User-Agent": "manlianrili-calendar/1.0"})
@@ -344,8 +349,10 @@ def _tss_get(url: str):
         except requests.RequestException as exc:
             print(f"[thesportsdb] 请求失败：{exc}")
             time.sleep(TSS_DELAY_SECONDS)
+            TSS_FAILURES.append(f"{url.split('id=')[-1]}: {exc}")
             return None
     print("[thesportsdb] 重试仍被限流，跳过")
+    TSS_FAILURES.append(f"{url.split('id=')[-1]}: 429 限流")
     return None
 
 
@@ -424,9 +431,11 @@ def fetch_thesportsdb_pl() -> list:
 def collect_events():
     """收集事件并合并去重。返回 (events, coverage_note)。
 
-    football-data.org 是主来源；它不可用时，若允许兜底，就用 TheSportsDB 的英超数据顶上，
-    并在日志与日历描述里明确标注这是降级结果（缺欧冠）。
+    football-data.org 是主来源；它不可用时，若允许兜底，就用 TheSportsDB 顶上，
+    并在日志与日历描述里明确标注这是降级结果。
     """
+    failures_before = len(TSS_FAILURES)
+
     primary = []
     degraded = False
     try:
@@ -497,6 +506,12 @@ def collect_events():
     note = f"数据来源：{' + '.join(sources)}；覆盖：{'、'.join(competitions)}"
     if degraded:
         note += "（降级运行：未配置 FOOTBALL_DATA_TOKEN，数据来自 TheSportsDB）"
+    new_failures = TSS_FAILURES[failures_before:]
+    if new_failures:
+        print(f"[警告] TheSportsDB 有 {len(new_failures)} 个请求失败，本次覆盖可能不完整：")
+        for item in new_failures[:5]:
+            print(f"         {item}")
+        note += f"（注意：{len(new_failures)} 个接口请求失败，覆盖可能不完整）"
     print(f"[覆盖] {note}")
     return merged, note
 
