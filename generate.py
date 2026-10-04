@@ -230,6 +230,15 @@ def _is_man_utd(team) -> bool:
 
 # ---------- 数据源 1：football-data.org ----------
 
+def _fd_fetch_matches(code: str, season):
+    """请求某个赛事的比赛列表。season 为 None 时表示用 API 默认（当前赛季）。"""
+    url = f"https://api.football-data.org/v4/competitions/{code}/matches"
+    params = {} if season is None else {"season": season}
+    resp = requests.get(url, headers={"X-Auth-Token": FOOTBALL_DATA_TOKEN}, params=params, timeout=40)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def fetch_football_data() -> list:
     if not FOOTBALL_DATA_TOKEN:
         raise SystemExit(
@@ -238,29 +247,41 @@ def fetch_football_data() -> list:
             "然后在本机设为环境变量，或在 GitHub 仓库里加 Actions Secret（名字用 FOOTBALL_DATA_TOKEN）。"
         )
 
-    headers = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
     events = []
     for code, cn_name in FD_COMPETITIONS:
-        url = f"https://api.football-data.org/v4/competitions/{code}/matches"
-        params = {"season": FD_SEASON}
-        try:
-            resp = requests.get(url, headers=headers, params=params, timeout=40)
-            resp.raise_for_status()
-        except requests.RequestException as exc:
-            raise SystemExit(
-                f"错误：请求 football-data.org 失败（{exc}）。"
-                f"常见原因：token 无效、免费档不含该赛事、超出 10 次/分钟的限制。"
-            )
-        payload = resp.json()
-        matches = payload.get("matches") or []
-        print(f"[football-data] {cn_name}({code}) season={FD_SEASON} 返回 {len(matches)} 场")
+        payload = None
+        matches = []
+        # 先用配置的赛季；取不到就退回 API 默认（当前赛季），避免赛季编号不一致直接失败。
+        for season in (FD_SEASON, None):
+            label = f"season={season}" if season is not None else "当前赛季"
+            try:
+                payload = _fd_fetch_matches(code, season)
+            except requests.RequestException as exc:
+                print(f"[football-data] {cn_name}({code}) {label} 请求失败：{exc}")
+                payload = None
+                continue
+
+            matches = payload.get("matches") or []
+            result_count = (payload.get("resultSet") or {}).get("count")
+            print(f"[football-data] {cn_name}({code}) {label} 返回 {len(matches)} 场"
+                  + (f"（resultSet.count={result_count}）" if result_count is not None else ""))
+            if result_count is not None and result_count > len(matches):
+                print(f"[football-data] 警告：接口只返回 {len(matches)} 场，少于 resultSet.count="
+                      f"{result_count}，结果可能被截断")
+            if matches:
+                break
+            print(f"[football-data] {cn_name}({code}) {label} 没有数据，尝试赛季回退")
+
+        if not matches:
+            print(f"[football-data] 警告：{cn_name}({code}) 两个赛季都没取到比赛")
+            continue
 
         for match in matches:
             home = match.get("homeTeam") or {}
             away = match.get("awayTeam") or {}
             if not (_is_man_utd(home) or _is_man_utd(away)):
                 continue
-            for side, team in (("home", home), ("away", away)):
+            for team in (home, away):
                 if _is_man_utd(team) and team.get("id") != FD_TEAM_ID:
                     print(
                         f"[提示] 通过队名匹配到曼联，但 id={team.get('id')} 与配置的 "
@@ -272,9 +293,7 @@ def fetch_football_data() -> list:
                 continue
             score = ((match.get("score") or {}).get("fullTime") or {})
             finished = status in FD_FINISHED_STATUS and score.get("home") is not None
-            if status == "POSTPONED":
-                state = NOT_STARTED
-            elif finished:
+            if finished:
                 state = FINISHED
             else:
                 state = NOT_STARTED
@@ -372,8 +391,10 @@ def collect_events() -> list:
     primary = fetch_football_data()
     if not primary:
         raise SystemExit(
-            f"错误：football-data.org 在 season={FD_SEASON} 没返回任何曼联比赛，"
-            f"拒绝生成不完整的日历。"
+            f"错误：football-data.org 没有返回任何曼联比赛"
+            f"（已尝试 season={FD_SEASON} 与「当前赛季」两种取法），拒绝生成不完整的日历。\n"
+            f"请检查：token 是否有效、免费档是否包含 {'/'.join(c for c, _ in FD_COMPETITIONS)}、"
+            f"以及该赛季是否已经开始。"
         )
 
     try:
