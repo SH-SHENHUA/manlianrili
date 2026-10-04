@@ -621,7 +621,9 @@ def build_calendar(events, stamp: str, calendar_note: str = "") -> str:
         "X-WR-TIMEZONE:Asia/Shanghai",
     ]
     if calendar_note:
-        # 写进日历描述：在 iPhone 上也能看到覆盖范围与数据来源，降级运行不会是"静默"的。
+        # 写进日历的 X-WR-CALDESC 字段。注意：各客户端是否显示该字段并不一致
+        # （iOS 日历界面没有日历描述的入口），所以降级状态主要靠运行日志暴露，
+        # 这里只是把它一并留在产物里，便于排查。
         lines.append(f"X-WR-CALDESC:{escape_text(calendar_note)}")
     for event in events:
         lines.extend(build_event(event, stamp))
