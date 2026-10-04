@@ -24,13 +24,14 @@
 
 | 模式 | 触发条件 | 结果 |
 | --- | --- | --- |
-| **完整模式** | 配置了 `FOOTBALL_DATA_TOKEN` | 英超 + 欧冠 + 各杯赛 |
-| **降级模式** | 没有 token，或主来源请求失败 | 自动改用 TheSportsDB 的英超数据 → **英超 + 杯赛，没有欧冠** |
+| **完整模式** | 配置了 `FOOTBALL_DATA_TOKEN` | 英超 + 欧冠 + 各杯赛，数据来自 football-data.org（权威、含球场与比分） |
+| **降级模式** | 没有 token，或主来源请求失败 | 自动改用 TheSportsDB：**英超 38 轮 + 欧冠联赛阶段**（实测各 38 / 8 场）+ TheSportsDB 能提供的杯赛 |
 
 降级**不是静默的**：
 
 - CI 日志里会打印醒目的警告横幅；
-- 日历自身的描述字段会写明「降级运行：未配置 FOOTBALL_DATA_TOKEN，缺少欧冠」，在 iPhone 上可见。
+- 日历自身的描述字段会写明「降级运行：未配置 FOOTBALL_DATA_TOKEN，数据来自 TheSportsDB」，在 iPhone 上可见；
+- 覆盖范围会随 TheSportsDB 免费库实际提供的数据变化（例如足总杯曼联从第 3 轮入场，抽签后才会出现）。
 
 想禁止降级、让它在主来源不可用时直接失败，把环境变量 `ALLOW_PL_FALLBACK` 设为 `0`。
 
@@ -51,6 +52,10 @@
 - **未来轮次的日期可能微调**：把 TheSportsDB 的 38 轮英超与独立来源
   [openfootball](https://github.com/openfootball/england) 比对，34 轮日期完全一致、2 轮差一天
   （处于电视转播调整期），比分与开球时间（按夏令时换算后）一致。
+- **欧冠数据也做过独立印证**：把 TheSportsDB 的 8 场欧冠联赛阶段与
+  [premierleague.com 公布的 2026/27 联赛阶段日程](https://www.premierleague.com/en/news/4699703/champions-league-league-phase-schedule-confirmed)
+  比对，第 3/4/6/8 轮日期完全相同，其余 4 轮落在同一轮的 Tue/Wed 窗口内
+  （联赛阶段每轮跨两天）；开球时间与官方 17:45 / 20:00 换算成 UTC 后一致。
 - 想拿到 100% 完整的全赛事赛程，需要付费数据源（例如 API-Sports 付费套餐，
   `fixtures?team=33&season=2026` 一次就能拿到所有赛事）。
 - 想调整杯赛清单或扫描轮次，改 `generate.py` 顶部的 `TSS_CUPS` / `TSS_CUP_ROUNDS`。

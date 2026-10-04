@@ -49,6 +49,9 @@ TSS_CUP_ROUNDS = tuple(range(1, 9))
 # TheSportsDB 的英超联赛 id：当 football-data.org 不可用时作为兜底来源。
 TSS_PL_LEAGUE_ID = "4328"
 TSS_PL_ROUNDS = tuple(range(1, 39))
+# 欧冠（联赛阶段 8 轮，多扫几轮以便后续淘汰赛出现时也能补上）。
+TSS_UCL_LEAGUE_ID = "4480"
+TSS_UCL_ROUNDS = tuple(range(1, 13))
 # 是否允许兜底（默认允许）。设为 0 则 football-data.org 不可用时直接失败。
 ALLOW_PL_FALLBACK = (os.environ.get("ALLOW_PL_FALLBACK") or "1") != "0"
 # 两次 TheSportsDB 请求之间的间隔（秒），避开其免费 key 的限流。
@@ -408,10 +411,12 @@ def fetch_thesportsdb_cups() -> list:
 
 
 def fetch_thesportsdb_pl() -> list:
-    """兜底：从 TheSportsDB 按 38 轮枚举英超，取出曼联整季联赛赛程。"""
+    """兜底：从 TheSportsDB 按轮次枚举英超与欧冠，取出曼联的整季比赛。"""
     events = _tss_round_events(TSS_PL_LEAGUE_ID, "英格兰超级联赛", TSS_PL_ROUNDS)
     print(f"[thesportsdb] 英超兜底找到曼联比赛 {len(events)} 场")
-    return events
+    ucl = _tss_round_events(TSS_UCL_LEAGUE_ID, "欧洲冠军联赛", TSS_UCL_ROUNDS)
+    print(f"[thesportsdb] 欧冠兜底找到曼联比赛 {len(ucl)} 场")
+    return events + ucl
 
 
 # ---------- 合并 ----------
@@ -443,18 +448,18 @@ def collect_events():
                 f"（已尝试 season={FD_SEASON} 与「当前赛季」），且已禁用兜底，拒绝生成不完整的日历。\n"
                 f"请检查：token 是否有效、免费档是否包含 "
                 f"{'/'.join(c for c, _ in FD_COMPETITIONS)}、以及该赛季是否已经开始。\n"
-                f"（想先用 TheSportsDB 的英超数据兜底，去掉 ALLOW_PL_FALLBACK=0 即可。）"
+                f"（想先用 TheSportsDB 的英超/欧冠数据兜底，去掉 ALLOW_PL_FALLBACK=0 即可。）"
             )
         degraded = True
         print("=" * 62)
-        print("[警告] 正在进行降级运行：改用 TheSportsDB 的英超数据。")
-        print("[警告] 此结果只含英超 + TheSportsDB 能提供的杯赛，缺少欧冠。")
-        print(f"[警告] 配置 FOOTBALL_DATA_TOKEN 后会自动恢复完整数据。")
+        print("[警告] 正在进行降级运行：改用 TheSportsDB 的数据。")
+        print("[警告] 覆盖范围取决于 TheSportsDB 免费库当前有什么（实测含英超与欧冠联赛阶段）。")
+        print("[警告] 配置 FOOTBALL_DATA_TOKEN 后会自动改用 football-data.org 的权威数据。")
         print("=" * 62)
         try:
             fallback = fetch_thesportsdb_pl()
         except Exception as exc:
-            print(f"[thesportsdb] 英超兜底出错：{type(exc).__name__}: {exc}")
+            print(f"[thesportsdb] 兜底出错：{type(exc).__name__}: {exc}")
             fallback = []
 
     seen = set()
@@ -491,7 +496,7 @@ def collect_events():
             sources.append(event["source"])
     note = f"数据来源：{' + '.join(sources)}；覆盖：{'、'.join(competitions)}"
     if degraded:
-        note += "（降级运行：未配置 FOOTBALL_DATA_TOKEN，缺少欧冠）"
+        note += "（降级运行：未配置 FOOTBALL_DATA_TOKEN，数据来自 TheSportsDB）"
     print(f"[覆盖] {note}")
     return merged, note
 
