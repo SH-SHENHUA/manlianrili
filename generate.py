@@ -216,6 +216,18 @@ def dedupe_key(event) -> tuple:
     )
 
 
+def _is_man_utd(team) -> bool:
+    """判断一个 football-data.org 的球队对象是不是曼联。
+
+    既认 id，也认队名：万一 id 与我们记录的 66 不一致，也不会取到 0 场而失败。
+    """
+    if not team:
+        return False
+    if team.get("id") == FD_TEAM_ID:
+        return True
+    return norm_team(team.get("name") or "").lower() == "manchester united"
+
+
 # ---------- 数据源 1：football-data.org ----------
 
 def fetch_football_data() -> list:
@@ -244,10 +256,17 @@ def fetch_football_data() -> list:
         print(f"[football-data] {cn_name}({code}) season={FD_SEASON} 返回 {len(matches)} 场")
 
         for match in matches:
-            home_id = (match.get("homeTeam") or {}).get("id")
-            away_id = (match.get("awayTeam") or {}).get("id")
-            if FD_TEAM_ID not in (home_id, away_id):
+            home = match.get("homeTeam") or {}
+            away = match.get("awayTeam") or {}
+            if not (_is_man_utd(home) or _is_man_utd(away)):
                 continue
+            for side, team in (("home", home), ("away", away)):
+                if _is_man_utd(team) and team.get("id") != FD_TEAM_ID:
+                    print(
+                        f"[提示] 通过队名匹配到曼联，但 id={team.get('id')} 与配置的 "
+                        f"FD_TEAM_ID={FD_TEAM_ID} 不同，请更新配置。"
+                    )
+                    break
             status = match.get("status")
             if status in FD_SKIP_STATUS:
                 continue
@@ -264,8 +283,8 @@ def fetch_football_data() -> list:
                     "source": "football-data",
                     "key": f"fd-{match['id']}",
                     "start": datetime.fromisoformat(match["utcDate"].replace("Z", "+00:00")),
-                    "home": (match["homeTeam"] or {}).get("name") or "?",
-                    "away": (match["awayTeam"] or {}).get("name") or "?",
+                    "home": home.get("name") or "?",
+                    "away": away.get("name") or "?",
                     "competition": cn_name,
                     "venue": (match.get("venue") or "").strip(),
                     "score": (score.get("home"), score.get("away")) if finished else None,
